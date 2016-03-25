@@ -1,6 +1,6 @@
-linux (4.5.0-040500.201603140130) unstable; urgency=low
+linux (4.6.0-040600rc0.201603251043) unstable; urgency=low
 
-  Mainline build at commit: v4.5
+  Mainline build at commit: v4.6
 
  -- Mainline Build <kernel@tangerine>  Mon, 14 Mar 2016 01:30:34 -0400
 
