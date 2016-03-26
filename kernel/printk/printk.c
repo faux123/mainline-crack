@@ -46,6 +46,7 @@
 #include <linux/utsname.h>
 #include <linux/ctype.h>
 #include <linux/uio.h>
+#include <linux/kthread.h>
 
 #include <asm/uaccess.h>
 #include <asm-generic/sections.h>
@@ -283,6 +284,19 @@ static u32 clear_idx;
 static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
 static char *log_buf = __log_buf;
 static u32 log_buf_len = __LOG_BUF_LEN;
+
+/*
+ * When true, printing to console will happen synchronously.
+ * The default value on UP systems is 'true'.
+ */
+static bool __read_mostly printk_sync = !IS_ENABLED(CONFIG_SMP);
+module_param_named(synchronous, printk_sync, bool, S_IRUGO);
+MODULE_PARM_DESC(synchronous, "make printing to console synchronous");
+
+/* Printing kthread for async printk */
+static struct task_struct *printk_kthread;
+/* When `true' - printing thread has messages to print */
+static bool need_flush_console;
 
 /* Return log buffer address */
 char *log_buf_addr_get(void)
@@ -1608,6 +1622,8 @@ asmlinkage int vprintk_emit(int facility, int level,
 			    const char *dict, size_t dictlen,
 			    const char *fmt, va_list args)
 {
+	/* cpu currently holding logbuf_lock in this function */
+	static unsigned int logbuf_cpu = UINT_MAX;
 	static bool recursion_bug;
 	static char textbuf[LOG_LINE_MAX];
 	char *text = textbuf;
@@ -1617,8 +1633,7 @@ asmlinkage int vprintk_emit(int facility, int level,
 	int this_cpu;
 	int printed_len = 0;
 	bool in_sched = false;
-	/* cpu currently holding logbuf_lock in this function */
-	static unsigned int logbuf_cpu = UINT_MAX;
+	bool in_panic = console_loglevel == CONSOLE_LOGLEVEL_MOTORMOUTH;
 
 	if (level == LOGLEVEL_SCHED) {
 		level = LOGLEVEL_DEFAULT;
@@ -1654,6 +1669,14 @@ asmlinkage int vprintk_emit(int facility, int level,
 	/* This stops the holder of console_sem just where we want him */
 	raw_spin_lock(&logbuf_lock);
 	logbuf_cpu = this_cpu;
+
+	/*
+	 * Set printing kthread sleep condition early, under the
+	 * logbuf_lock, so it (if RUNNING) will go to console_lock()
+	 * and spin on logbuf_lock.
+	 */
+	if (!in_panic && printk_kthread && !need_flush_console)
+		need_flush_console = true;
 
 	if (unlikely(recursion_bug)) {
 		static const char recursion_msg[] =
@@ -1757,12 +1780,28 @@ asmlinkage int vprintk_emit(int facility, int level,
 	if (!in_sched) {
 		lockdep_off();
 		/*
-		 * Try to acquire and then immediately release the console
-		 * semaphore.  The release will print out buffers and wake up
-		 * /dev/kmsg and syslog() users.
+		 * By default we print message to console asynchronously so
+		 * that kernel doesn't get stalled due to slow serial console.
+		 * That can lead to softlockups, lost interrupts, or userspace
+		 * timing out under heavy printing load.
+		 *
+		 * However we resort to synchronous printing of messages during
+		 * early boot, when synchronous printing was explicitly
+		 * requested by kernel parameter, or when console_verbose() was
+		 * called to print everything during panic / oops.
 		 */
-		if (console_trylock())
-			console_unlock();
+		if (!in_panic && printk_kthread) {
+			/* Offload printing to a schedulable context. */
+			wake_up_process(printk_kthread);
+		} else {
+			/*
+			 * Try to acquire and then immediately release the
+			 * console semaphore.  The release will print out
+			 * buffers and wake up /dev/kmsg and syslog() users.
+			 */
+			if (console_trylock())
+				console_unlock();
+		}
 		lockdep_on();
 	}
 
@@ -1899,6 +1938,8 @@ static size_t cont_print_text(char *text, size_t size) { return 0; }
 /* Still needs to be defined for users */
 DEFINE_PER_CPU(printk_func_t, printk_func);
 
+static struct task_struct *printk_kthread;
+static bool need_flush_console;
 #endif /* CONFIG_PRINTK */
 
 #ifdef CONFIG_EARLY_PRINTK
@@ -2337,6 +2378,8 @@ skip:
 	 */
 	raw_spin_lock(&logbuf_lock);
 	retry = console_seq != log_next_seq;
+	if (!retry && printk_kthread)
+		need_flush_console = false;
 	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
 
 	if (retry && console_trylock())
@@ -2722,6 +2765,40 @@ static int __init printk_late_init(void)
 late_initcall(printk_late_init);
 
 #if defined CONFIG_PRINTK
+static int printk_kthread_func(void *data)
+{
+	while (1) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (!need_flush_console)
+			schedule();
+
+		__set_current_state(TASK_RUNNING);
+
+		console_lock();
+		console_unlock();
+	}
+
+	return 0;
+}
+
+static int __init init_printk_kthread(void)
+{
+	struct task_struct *thread;
+
+	if (printk_sync)
+		return 0;
+
+	thread = kthread_run(printk_kthread_func, NULL, "printk");
+	if (IS_ERR(thread)) {
+		pr_err("printk: unable to create printing thread\n");
+		printk_sync = true;
+	} else {
+		printk_kthread = thread;
+	}
+	return 0;
+}
+late_initcall(init_printk_kthread);
+
 /*
  * Delayed printk version, for scheduler-internal messages:
  */

@@ -3114,6 +3114,16 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 	printk.time=	Show timing data prefixed to each printk message line
 			Format: <bool>  (1/Y/y=enable, 0/N/n=disable)
 
+	printk.synchronous=
+			By default kernel messages are printed to console
+			asynchronously (except during early boot or when oops
+			is happening). That avoids kernel stalling behind slow
+			serial console and thus avoids softlockups, interrupt
+			timeouts, or userspace timing out during heavy printing.
+			However for debugging problems, printing messages to
+			console immediately may be desirable. This option
+			enables such behavior.
+
 	processor.max_cstate=	[HW,ACPI]
 			Limit processor to maximum C-state
 			max_cstate=9 overrides any DMI blacklist limit.
