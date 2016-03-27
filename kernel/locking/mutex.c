@@ -571,20 +571,6 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 
 	while (!acquired) {
 		/*
-		 * Lets try to take the lock again - this is needed even if
-		 * we get here for the first time (shortly after failing to
-		 * acquire the lock), to make sure that we get a wakeup once
-		 * it's unlocked. Later on, if we sleep, this is the
-		 * operation that gives us the lock. We xchg it to -1, so
-		 * that when we release the lock, we properly wake up the
-		 * other waiters. We only attempt the xchg if the count is
-		 * non-negative in order to avoid unnecessary xchg operations:
-		 */
-		if (atomic_read(&lock->count) >= 0 &&
-		    (atomic_xchg_acquire(&lock->count, -1) == 1))
-			break;
-
-		/*
 		 * got a signal? (This code gets eliminated in the
 		 * TASK_UNINTERRUPTIBLE case.)
 		 */
@@ -599,7 +585,35 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 				goto err;
 		}
 
-		__set_task_state(task, state);
+
+		/*
+		 * We need to set the state first before changing the count
+		 * to -1 to avoid missed wakeup even though the problem can
+		 * be cleared by a new waiter entering the queue.
+		 *
+		 *	Sleep			Wakeup
+		 *	-----			------
+		 *   [S] p->state = state [RmW] count = 1
+		 *	 MB			MB
+		 * [RmW] count = -1	    [L] if ((prev_count < 0) &&
+		 *	 if (prev_count < 1)	    (p->state & state))
+		 *	     sleep		    wakeup
+		 */
+		set_task_state(task, state);
+
+		/*
+		 * Lets try to take the lock again - this is needed even if
+		 * we get here for the first time (shortly after failing to
+		 * acquire the lock), to make sure that we get a wakeup once
+		 * it's unlocked. Later on, if we sleep, this is the
+		 * operation that gives us the lock. We xchg it to -1, so
+		 * that when we release the lock, we properly wake up the
+		 * other waiters. We only attempt the xchg if the count is
+		 * non-negative in order to avoid unnecessary xchg operations:
+		 */
+		if (atomic_read(&lock->count) >= 0 &&
+		   (atomic_xchg_acquire(&lock->count, -1) == 1))
+			break;
 
 		/* didn't get the lock, go to sleep: */
 		spin_unlock_mutex(&lock->wait_lock, flags);
