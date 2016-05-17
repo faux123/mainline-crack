@@ -1858,6 +1858,8 @@ static void hdmi_set_chmap(struct hdac_device *hdac, int pcm_idx,
 	struct hdmi_spec *spec = codec->spec;
 	struct hdmi_spec_per_pin *per_pin = pcm_idx_to_pin(spec, pcm_idx);
 
+	if (!per_pin)
+		return;
 	mutex_lock(&per_pin->lock);
 	per_pin->chmap_set = true;
 	memcpy(per_pin->chmap, chmap, ARRAY_SIZE(per_pin->chmap));
@@ -2230,6 +2232,7 @@ static void intel_pin_eld_notify(void *audio_ptr, int port)
 	if (atomic_read(&(codec)->core.in_pm))
 		return;
 
+	snd_hdac_i915_set_bclk(&codec->bus->core);
 	check_presence_and_report(codec, pin_nid);
 }
 
@@ -3398,6 +3401,9 @@ static int patch_atihdmi(struct hda_codec *codec)
 	spec->ops.pin_hbr_setup = atihdmi_pin_hbr_setup;
 	spec->ops.setup_stream = atihdmi_setup_stream;
 
+	spec->chmap.ops.pin_get_slot_channel = atihdmi_pin_get_slot_channel;
+	spec->chmap.ops.pin_set_slot_channel = atihdmi_pin_set_slot_channel;
+
 	if (!has_amd_full_remap_support(codec)) {
 		/* override to ATI/AMD-specific versions with pairwise mapping */
 		spec->chmap.ops.chmap_cea_alloc_validate_get_type =
@@ -3405,10 +3411,6 @@ static int patch_atihdmi(struct hda_codec *codec)
 		spec->chmap.ops.cea_alloc_to_tlv_chmap =
 				atihdmi_paired_cea_alloc_to_tlv_chmap;
 		spec->chmap.ops.chmap_validate = atihdmi_paired_chmap_validate;
-		spec->chmap.ops.pin_get_slot_channel =
-				atihdmi_pin_get_slot_channel;
-		spec->chmap.ops.pin_set_slot_channel =
-				atihdmi_pin_set_slot_channel;
 	}
 
 	/* ATI/AMD converters do not advertise all of their capabilities */
